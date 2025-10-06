@@ -8,5 +8,3 @@ def print_pack_report(cakes_number):
             print(f'{num} - расфасуем по 5')
         else:
             print(f'{num} - не заказываем!')
-
-print_pack_report(100)
