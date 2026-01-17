@@ -1,0 +1,471 @@
+```python
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Dict, Optional, List
+from enum import Enum
+
+
+class SeatStatus(Enum):
+    """Статусы места в системе бронирования."""
+    FREE = "free"          # Свободное место
+    RESERVED = "reserved"  # Забронированное место
+    SOLD = "sold"          # Проданное место (оплаченное)
+
+
+@dataclass
+class User:
+    """
+    Пользователь системы бронирования.
+    
+    Attributes:
+        user_id: Уникальный идентификатор пользователя
+        name: Имя пользователя
+    """
+    user_id: str
+    name: str
+
+
+@dataclass
+class Seat:
+    """
+    Место на мероприятии.
+    
+    Attributes:
+        seat_id: Уникальный идентификатор места
+        row: Ряд места
+        number: Номер места в ряду
+        status: Текущий статус места
+        current_user: Пользователь, связанный с местом (None если свободно)
+    """
+    seat_id: str
+    row: str
+    number: str
+    status: SeatStatus = SeatStatus.FREE
+    current_user: Optional[User] = None
+
+
+@dataclass
+class EventSession:
+    """
+    Сеанс мероприятия с картой мест.
+    
+    Attributes:
+        session_id: Уникальный идентификатор сеанса
+        time: Время проведения сеанса
+        seats: Карта мест (seat_id -> Seat)
+    """
+    session_id: str
+    time: str
+    seats: Dict[str, Seat] = field(default_factory=dict)
+
+    def get_seat(self, seat_id: str) -> Optional[Seat]:
+        """
+        Получить место по идентификатору.
+        
+        Args:
+            seat_id: Идентификатор места
+            
+        Returns:
+            Seat: Объект места или None если не найдено
+        """
+        return self.seats.get(seat_id)
+
+
+class BookingCommand(ABC):
+    """
+    Абстрактный базовый класс для команд бронирования.
+    
+    Каждая команда должна реализовывать методы execute и undo.
+    Команды изменяют состояние сеанса и мест через строго определенный интерфейс.
+    """
+    
+    @abstractmethod
+    def execute(self, session: EventSession, seat_id: str, user: User) -> bool:
+        """
+        Выполнить команду бронирования.
+        
+        Args:
+            session: Сеанс мероприятия
+            seat_id: Идентификатор места
+            user: Пользователь, выполняющий действие
+            
+        Returns:
+            bool: True если команда выполнена успешно, False в противном случае
+        """
+        pass
+
+    @abstractmethod
+    def undo(self, session: EventSession) -> bool:
+        """
+        Отменить выполненную команду.
+        
+        Args:
+            session: Сеанс мероприятия
+            
+        Returns:
+            bool: True если отмена выполнена успешно, False в противном случае
+        """
+        pass
+
+
+class ReserveSeatCommand(BookingCommand):
+    """
+    Команда бронирования места.
+    
+    Переводит место из статуса FREE в RESERVED и связывает с пользователем.
+    """
+    
+    def __init__(self):
+        """Инициализация команды с сохранением состояния для отмены."""
+        self.original_seat_state: Optional[Seat] = None
+        self.seat_id: Optional[str] = None
+
+    def execute(self, session: EventSession, seat_id: str, user: User) -> bool:
+        """
+        Выполнить бронирование места.
+        
+        Args:
+            session: Сеанс мероприятия
+            seat_id: Идентификатор места
+            user: Пользователь, выполняющий бронирование
+            
+        Returns:
+            bool: True если место успешно забронировано, False если место занято или не существует
+        """
+        seat = session.get_seat(seat_id)
+        
+        if not seat or seat.status != SeatStatus.FREE:
+            return False
+            
+        # Сохраняем исходное состояние для отмены
+        self.original_seat_state = Seat(
+            seat_id=seat.seat_id,
+            row=seat.row,
+            number=seat.number,
+            status=seat.status,
+            current_user=seat.current_user
+        )
+        self.seat_id = seat_id
+        
+        # Изменяем состояние места
+        seat.status = SeatStatus.RESERVED
+        seat.current_user = user
+        
+        return True
+
+    def undo(self, session: EventSession) -> bool:
+        """
+        Отменить бронирование места.
+        
+        Восстанавливает исходное состояние места (свободное).
+        
+        Args:
+            session: Сеанс мероприятия
+            
+        Returns:
+            bool: True если отмена выполнена успешно, False если нет данных для отмены
+        """
+        if not self.original_seat_state or not self.seat_id:
+            return False
+            
+        seat = session.get_seat(self.seat_id)
+        if not seat:
+            return False
+            
+        # Восстанавливаем исходное состояние
+        seat.status = self.original_seat_state.status
+        seat.current_user = self.original_seat_state.current_user
+        
+        return True
+
+
+class CancelReservationCommand(BookingCommand):
+    """
+    Команда отмены бронирования.
+    
+    Переводит место из статуса RESERVED обратно в FREE и удаляет связь с пользователем.
+    """
+    
+    def __init__(self):
+        """Инициализация команды с сохранением состояния для отмены."""
+        self.original_seat_state: Optional[Seat] = None
+        self.seat_id: Optional[str] = None
+
+    def execute(self, session: EventSession, seat_id: str, user: User) -> bool:
+        """
+        Выполнить отмену бронирования.
+        
+        Args:
+            session: Сеанс мероприятия
+            seat_id: Идентификатор места
+            user: Пользователь, отменяющий бронирование (должен совпадать с владельцем)
+            
+        Returns:
+            bool: True если бронирование успешно отменено, False если место не забронировано
+                  или пользователь не является владельцем
+        """
+        seat = session.get_seat(seat_id)
+        
+        if not seat or seat.status != SeatStatus.RESERVED or seat.current_user != user:
+            return False
+            
+        # Сохраняем исходное состояние для отмены
+        self.original_seat_state = Seat(
+            seat_id=seat.seat_id,
+            row=seat.row,
+            number=seat.number,
+            status=seat.status,
+            current_user=seat.current_user
+        )
+        self.seat_id = seat_id
+        
+        # Изменяем состояние места
+        seat.status = SeatStatus.FREE
+        seat.current_user = None
+        
+        return True
+
+    def undo(self, session: EventSession) -> bool:
+        """
+        Отменить отмену бронирования (восстановить бронь).
+        
+        Args:
+            session: Сеанс мероприятия
+            
+        Returns:
+            bool: True если восстановление выполнено успешно, False если нет данных для отмены
+        """
+        if not self.original_seat_state or not self.seat_id:
+            return False
+            
+        seat = session.get_seat(self.seat_id)
+        if not seat:
+            return False
+            
+        # Восстанавливаем исходное состояние (забронированное)
+        seat.status = self.original_seat_state.status
+        seat.current_user = self.original_seat_state.current_user
+        
+        return True
+
+
+class PurchaseTicketCommand(BookingCommand):
+    """
+    Команда подтверждения брони и оплаты билета.
+    
+    Переводит место из статуса RESERVED в SOLD и оставляет связь с пользователем.
+    """
+    
+    def __init__(self):
+        """Инициализация команды с сохранением состояния для отмены."""
+        self.original_seat_state: Optional[Seat] = None
+        self.seat_id: Optional[str] = None
+
+    def execute(self, session: EventSession, seat_id: str, user: User) -> bool:
+        """
+        Выполнить подтверждение брони и оплату.
+        
+        Args:
+            session: Сеанс мероприятия
+            seat_id: Идентификатор места
+            user: Пользователь, подтверждающий оплату (должен совпадать с владельцем брони)
+            
+        Returns:
+            bool: True если оплата успешно выполнена, False если место не забронировано
+                  или пользователь не является владельцем
+        """
+        seat = session.get_seat(seat_id)
+        
+        if not seat or seat.status != SeatStatus.RESERVED or seat.current_user != user:
+            return False
+            
+        # Сохраняем исходное состояние для отмены
+        self.original_seat_state = Seat(
+            seat_id=seat.seat_id,
+            row=seat.row,
+            number=seat.number,
+            status=seat.status,
+            current_user=seat.current_user
+        )
+        self.seat_id = seat_id
+        
+        # Изменяем состояние места
+        seat.status = SeatStatus.SOLD
+        
+        return True
+
+    def undo(self, session: EventSession) -> bool:
+        """
+        Отменить оплату билета (вернуть в статус RESERVED).
+        
+        Args:
+            session: Сеанс мероприятия
+            
+        Returns:
+            bool: True если отмена выполнена успешно, False если нет данных для отмены
+        """
+        if not self.original_seat_state or not self.seat_id:
+            return False
+            
+        seat = session.get_seat(self.seat_id)
+        if not seat:
+            return False
+            
+        # Восстанавливаем исходное состояние (забронированное)
+        seat.status = self.original_seat_state.status
+        seat.current_user = self.original_seat_state.current_user
+        
+        return True
+
+
+class ChangeSeatCommand(BookingCommand):
+    """
+    Команда изменения забронированного места.
+    
+    Позволяет пользователю изменить место с одного на другое при сохранении брони.
+    """
+    
+    def __init__(self):
+        """Инициализация команды с сохранением состояний для отмены."""
+        self.original_from_seat_state: Optional[Seat] = None
+        self.original_to_seat_state: Optional[Seat] = None
+        self.from_seat_id: Optional[str] = None
+        self.to_seat_id: Optional[str] = None
+        self.user: Optional[User] = None
+
+    def execute(self, session: EventSession, seat_id: str, user: User) -> bool:
+        """
+        Выполнить изменение места.
+        
+        Args:
+            session: Сеанс мероприятия
+            seat_id: Идентификатор НОВОГО места
+            user: Пользователь, изменяющий место
+            
+        Returns:
+            bool: True если изменение выполнено успешно, False в противном случае
+        """
+        # Находим текущее забронированное место пользователя
+        current_seat = None
+        for seat in session.seats.values():
+            if seat.status == SeatStatus.RESERVED and seat.current_user == user:
+                current_seat = seat
+                break
+                
+        if not current_seat:
+            return False
+            
+        new_seat = session.get_seat(seat_id)
+        
+        if not new_seat or new_seat.status != SeatStatus.FREE:
+            return False
+            
+        # Сохраняем исходные состояния для отмены
+        self.original_from_seat_state = Seat(
+            seat_id=current_seat.seat_id,
+            row=current_seat.row,
+            number=current_seat.number,
+            status=current_seat.status,
+            current_user=current_seat.current_user
+        )
+        
+        self.original_to_seat_state = Seat(
+            seat_id=new_seat.seat_id,
+            row=new_seat.row,
+            number=new_seat.number,
+            status=new_seat.status,
+            current_user=new_seat.current_user
+        )
+        
+        self.from_seat_id = current_seat.seat_id
+        self.to_seat_id = new_seat.seat_id
+        self.user = user
+        
+        # Изменяем состояния мест
+        # Освобождаем старое место
+        current_seat.status = SeatStatus.FREE
+        current_seat.current_user = None
+        
+        # Бронируем новое место
+        new_seat.status = SeatStatus.RESERVED
+        new_seat.current_user = user
+        
+        return True
+
+    def undo(self, session: EventSession) -> bool:
+        """
+        Отменить изменение места (вернуть на исходное место).
+        
+        Args:
+            session: Сеанс мероприятия
+            
+        Returns:
+            bool: True если отмена выполнена успешно, False если нет данных для отмены
+        """
+        if (not self.original_from_seat_state or not self.original_to_seat_state or
+            not self.from_seat_id or not self.to_seat_id):
+            return False
+            
+        from_seat = session.get_seat(self.from_seat_id)
+        to_seat = session.get_seat(self.to_seat_id)
+        
+        if not from_seat or not to_seat:
+            return False
+            
+        # Восстанавливаем исходные состояния
+        from_seat.status = self.original_from_seat_state.status
+        from_seat.current_user = self.original_from_seat_state.current_user
+        
+        to_seat.status = self.original_to_seat_state.status
+        to_seat.current_user = self.original_to_seat_state.current_user
+        
+        return True
+
+
+class BookingProcessor:
+    """
+    Процессор бронирования, обеспечивающий последовательность и атомарность операций.
+    
+    Управляет выполнением команд и предоставляет возможность отмены последней операции.
+    """
+    
+    def __init__(self):
+        """Инициализация процессора с пустым стеком истории команд."""
+        self.history: List[BookingCommand] = []
+
+    def execute_command(self, command: BookingCommand, session: EventSession, 
+                       seat_id: str, user: User) -> bool:
+        """
+        Выполнить команду бронирования и сохранить её в истории.
+        
+        Args:
+            command: Команда для выполнения
+            session: Сеанс мероприятия
+            seat_id: Идентификатор места
+            user: Пользователь, выполняющий команду
+            
+        Returns:
+            bool: True если команда выполнена успешно, False в противном случае
+        """
+        success = command.execute(session, seat_id, user)
+        
+        if success:
+            self.history.append(command)
+            
+        return success
+
+    def undo_last_command(self, session: EventSession) -> bool:
+        """
+        Отменить последнюю выполненную команду.
+        
+        Args:
+            session: Сеанс мероприятия
+            
+        Returns:
+            bool: True если отмена выполнена успешно, False если нет команд для отмены
+        """
+        if not self.history:
+            return False
+            
+        last_command = self.history.pop()
+        return last_command.undo(session)
