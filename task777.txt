@@ -23,3 +23,6 @@ User (id, name).
 BookingCommand (интерфейс команды).
 
 BookingProcessor, обеспечивающий последовательность и атомарность операций.
+
+
+lol bro who got you smile like that like
